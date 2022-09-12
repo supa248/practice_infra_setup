@@ -26,41 +26,41 @@ commands:
             aws cloudformation delete-stack --stack-name myStack-${CIRCLE_WORKFLOW_ID:0:5}
 
 jobs:
-  create_infrastructure:
-    # Specify the execution environment. You can specify an image from Dockerhub or use one of our Convenience Images from CircleCI's Developer Hub.
-    # See: https://circleci.com/docs/2.0/configuration-reference/#docker-machine-macos-windows-executor
-    docker:
-      - image: amazon/aws-cli
-    # Add steps to the job
-    # See: https://circleci.com/docs/2.0/configuration-reference/#steps
-    steps:
-      - checkout
-      - run:
-          name: Create Clouforrmation Stack
-          command: |
-            aws cloudformation deploy \
-            --template-file template \
-            --stack-name myStack-${CIRCLE_WORKFLOW_ID:0:5} \
-            --region us-east-1
-      - destroy_environment
+  # create_infrastructure:
+  #   # Specify the execution environment. You can specify an image from Dockerhub or use one of our Convenience Images from CircleCI's Developer Hub.
+  #   # See: https://circleci.com/docs/2.0/configuration-reference/#docker-machine-macos-windows-executor
+  #   docker:
+  #     - image: amazon/aws-cli
+  #   # Add steps to the job
+  #   # See: https://circleci.com/docs/2.0/configuration-reference/#steps
+  #   steps:
+  #     - checkout
+  #     - run:
+  #         name: Create Clouforrmation Stack
+  #         command: |
+  #           aws cloudformation deploy \
+  #           --template-file template \
+  #           --stack-name myStack-${CIRCLE_WORKFLOW_ID:0:5} \
+  #           --region us-east-1
+  #     - destroy_environment
 
-  configure_infrastructure:
-    docker:
-      - image: python:3.7-alpine3.11
+  # configure_infrastructure:
+  #   docker:
+  #     - image: python:3.7-alpine3.11
 
-    steps:
-      - checkout
-      - add_ssh_keys:
-          fingerprints: [68:d8:6c:e6:87:19:51:18:9f:2d:97:90:69:7b:40:29]
-      - run:
-          name: Install Ansible
-          command: |
-            apk add --update ansible
+  #   steps:
+  #     - checkout
+  #     - add_ssh_keys:
+  #         fingerprints: [68:d8:6c:e6:87:19:51:18:9f:2d:97:90:69:7b:40:29]
+  #     - run:
+  #         name: Install Ansible
+  #         command: |
+  #           apk add --update ansible
 
-      - run:
-          name: Run Playbook and Configure server
-          command: |
-            ansible-playbook -i inventory.txt main-remote.yaml
+  #     - run:
+  #         name: Run Playbook and Configure server
+  #         command: |
+  #           ansible-playbook -i inventory.txt main-remote.yaml
 
 
 
@@ -74,12 +74,92 @@ jobs:
   #         command: return 1
   #     - destroy_environment      
 
+  create_and_deploy_front_end:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - run:
+          name: Execute bucket.yaml - Create Cloudformation Stack
+          command:  |
+            aws cloudformation deploy \
+            --template-file bucket \
+            --stack-name stack-create-bucket-${CIRCLE_WORKFLOW_ID:0:7} \
+            --parameter-overrides MyBucketName="mybucket-${CIRCLE_WORKFLOW_ID:0:7}"    
+      - run: aws s3 sync . s3://mybucket-${CIRCLE_WORKFLOW_ID:0:7} --delete
+
+  get_last_deployment_id:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - run: yum install -y tar gzip
+      - run:
+          name: Fetch and save the old pipeline ID (bucket name) responsible for the last release.
+          command: |
+            aws cloudformation \
+            list-exports --query "Exports[?Name==\`PipelineID\`].Value" \
+            --no-paginate --output text > ~/textfile.txt
+      - persist_to_workspace:
+          root: ~/
+          paths: 
+            - textfile.txt 
+
+  promote_to_production:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - run:
+          name: Execute cloudfront.yml
+          command: |
+            aws cloudformation deploy \
+            --template-file cloudfront.yml \
+            --stack-name production-distro \
+            --parameter-overrides PipelineID="mybucket-${CIRCLE_WORKFLOW_ID:0:7}"
+
+  clean_up_old_front_end:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - run: yum install -y tar gzip
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Destroy the previous production version's S3 bucket and CloudFormation stack. 
+          # Use $OldBucketID environment variable or mybucket644752792305 below.
+          # Similarly, you can create and use $OldStackID environment variable in place of production-distro 
+          command: |
+            export OldBucketID=$(cat ~/textfile.txt)
+            aws s3 rm "s3://${OldBucketID}" --recursive
+          #  aws cloudformation delete-stack --stack-name production-distro 
+          #  aws cloudformation delete-stack --stack-name stack-create-bucket-${CIRCLE_WORKFLOW_ID:0:7}
+          #  aws cloudformation delete-stack --stack-name myStack-${CIRCLE_WORKFLOW_ID:0:5}                      
+
 # Invoke jobs via workflows
 # See: https://circleci.com/docs/2.0/configuration-reference/#workflows
 workflows:
+  # Name the workflow "welcome"
   my_workflow:
+    # Run the welcome/run job in its own container
     jobs:
-      - create_infrastructure
-      - configure_infrastructure
+    # - welcome/run
+    #  - print_greetings
+    #  - upload_file
+    #  - download_file:
+    #      requires:
+    #        - upload_file
+    #  - create_infrastructure
+    #  - configure_infrastructure
+      - create_and_deploy_front_end
+      - promote_to_production:
+          requires: 
+            - create_and_deploy_front_end
+      - get_last_deployment_id
+      - clean_up_old_front_end:
+          requires:
+            - get_last_deployment_id
+            - promote_to_production
       
      
